@@ -16,6 +16,7 @@ dependencies = [
   "requests>=2.32,<3",
   "rich>=14,<15",
   "tqdm>=4.66,<5",
+  "truststore>=0.10,<1",
 ]
 
 [tool.pytest.ini_options]

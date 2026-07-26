@@ -19,6 +19,20 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
+".venv\Scripts\python.exe" -c "import lxml, openpyxl, pandas, pyarrow, yaml, questionary, requests, rich, tqdm, truststore" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo The application environment needs to be updated.
+    echo Starting dependency setup...
+    echo.
+    call "%~dp0SETUP.bat"
+    if errorlevel 1 (
+        echo Setup did not complete. The application cannot start.
+        pause
+        exit /b 1
+    )
+)
+
 call ".venv\Scripts\activate.bat"
 if errorlevel 1 (
     echo [ERROR] Could not activate the Python environment.
