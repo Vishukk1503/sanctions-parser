@@ -5,6 +5,12 @@ import logging
 import sys
 from pathlib import Path
 
+from sanctions_parser.tls import enable_native_trust_store
+
+# Configure HTTPS before importing modules that initialize Requests/urllib3.
+# This lets managed Windows installations trust enterprise CAs installed by IT.
+enable_native_trust_store()
+
 from sanctions_parser.config import load_sources
 from sanctions_parser.interactive import InteractiveCLI
 from sanctions_parser.pipeline import SourceOutcome, process_source

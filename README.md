@@ -84,7 +84,7 @@ The easiest handoff requires no command-line knowledge.
 
 `SETUP.bat` creates an isolated `.venv`, installs the required packages, and
 verifies the source configuration. `RUN_APP.bat` automatically launches setup
-if the environment does not exist yet.
+if the environment is missing or needs a dependency update.
 
 ```powershell
 git clone https://github.com/Vishukk1503/sanctions-parser.git
@@ -92,6 +92,18 @@ cd sanctions-parser
 .\SETUP.bat
 .\RUN_APP.bat
 ```
+
+### Managed Windows networks
+
+The application uses Windows' native certificate trust store for HTTPS. This
+allows it to work securely on managed PCs where approved products such as Palo
+Alto GlobalProtect inspect HTTPS traffic using a corporate certificate installed
+by IT.
+
+Certificate and hostname verification remain enabled. The application does not
+use the insecure `verify=False` workaround. If an existing installation predates
+this support, rerun `SETUP.bat` once to install the required `truststore`
+dependency before launching `RUN_APP.bat`.
 
 ## Interactive application
 
