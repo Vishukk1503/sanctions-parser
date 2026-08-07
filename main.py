@@ -13,7 +13,7 @@ enable_native_trust_store()
 
 from sanctions_parser.config import load_sources
 from sanctions_parser.interactive import InteractiveCLI
-from sanctions_parser.pipeline import SourceOutcome, process_source
+from sanctions_parser.pipeline import SourceOutcome, process_source, run_delta_source
 
 ROOT = Path(__file__).resolve().parent
 LOGGER = logging.getLogger("sanctions_parser.main")
@@ -51,6 +51,11 @@ def arguments() -> argparse.Namespace:
         action="store_true",
         help="Process all enabled sources without opening the menu",
     )
+    parser.add_argument(
+        "--delta",
+        action="store_true",
+        help="Run checkpoint-based delta checks without opening the menu",
+    )
     parser.add_argument("--config", type=Path, default=ROOT / "config" / "sources.yaml")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -68,6 +73,28 @@ def main() -> int:
     if unknown:
         print(f"Unknown source(s): {', '.join(sorted(unknown))}", file=sys.stderr)
         return 2
+    if args.delta:
+        failed = False
+        for name, source in sources.items():
+            if not source.enabled or (selected and name not in selected):
+                continue
+            try:
+                outcome = run_delta_source(source, ROOT)
+            except Exception as exc:  # Isolation between providers is intentional.
+                LOGGER.exception("Delta source %s failed", name)
+                print(f"{name:8} failed             {exc}")
+                failed = True
+                continue
+            summary = outcome.summary
+            if summary is None:
+                print(f"{name:8} {outcome.status:18} {outcome.detail}")
+                continue
+            print(
+                f"{name:8} {outcome.status:18} "
+                f"new={summary.new:<6} updated={summary.updated:<6} "
+                f"removed={summary.removed:<6} {outcome.detail}"
+            )
+        return 1 if failed else 0
     outcomes: list[SourceOutcome] = []
     failed = False
     for name, source in sources.items():

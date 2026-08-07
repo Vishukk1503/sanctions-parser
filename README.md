@@ -116,16 +116,18 @@ Automated acquisition • validation • normalization
 What would you like to do?
   1) Run all enabled sources
   2) Select sources to process
-  3) View parsing reports
-  4) Troubleshoot
-  5) Open output folder
-  6) Exit
+  3) Run delta check
+  4) View reports
+  5) Troubleshoot
+  6) Open output folder
+  7) Exit
 ```
 
 The interface lets an operator:
 
 - process every provider or select only the required providers;
 - choose one export format or all available formats;
+- run a separate checkpoint-based change comparison;
 - return to the main menu after each completed action;
 - review record, entity-type, alias-quality, and field-coverage counts;
 - open the output directory directly;
@@ -157,6 +159,30 @@ provider or all providers, including:
 - addresses, documents, nationalities, programs, and dates of birth;
 - relationships, birth places, designations, regulations, contacts, and
   sanctions.
+
+### Delta checks and name reports
+
+**Run delta check** compares the latest successfully parsed provider data with
+that provider's previous successful delta checkpoint. The first delta run
+creates a checkpoint and does not incorrectly label every existing record as
+new. Later runs classify stable provider IDs as `NEW`, `UPDATED`, `REMOVED`, or
+unchanged.
+
+The main report keeps one row per changed sanctions record and displays its
+primary name, ordered strong/weak/former aliases, alias count, previous primary
+name, aliases added or removed, provider update date, and a plain-language
+description of what changed. A record also appears when another normalized
+section changes, such as an address or document, so its name and aliases remain
+available for identification.
+
+Delta checkpoints are independent from ordinary download state. A normal full
+run can therefore be performed between weekly delta checks without losing the
+pending comparison period. The checkpoint advances only after validation,
+parsing, comparison, and all report exports succeed. A failed delta run leaves
+the previous checkpoint intact.
+
+The **View reports** menu contains both parsing reports and the latest delta
+overview for all providers or an individual provider.
 
 ## Output structure
 
@@ -191,6 +217,11 @@ sanctions-parser/
 Only directories for the export formats selected by the operator are created.
 Previous raw XML versions remain archived instead of being overwritten.
 
+Delta reports are stored under `output/delta/<source>/<run timestamp>/`. Every
+delta report contains `change_summary` and `name_alias_changes` in CSV, Excel,
+and Parquet formats. Internal compressed checkpoints live under
+`.state/delta/`; they are operational state rather than user-facing exports.
+
 ### Normalized tables
 
 Every provider is exported through the same stable table set:
@@ -219,7 +250,7 @@ schema.
 
 Each Excel workbook also contains a convenience sheet named **`name+alias`**.
 It keeps one row per entity and places the primary name and that entity's
-Latin-script aliases together.
+Latin and non-Latin aliases together.
 
 Aliases are ordered by quality:
 
@@ -304,6 +335,13 @@ Run all enabled providers without opening the menu:
 python main.py --non-interactive
 ```
 
+Run the weekly delta workflow without opening the menu:
+
+```powershell
+python main.py --delta
+python main.py --delta --source ofac --source uk
+```
+
 Process one or several named providers:
 
 ```powershell
@@ -353,6 +391,8 @@ python -m pip check
 | `sanctions_parser/parsers.py` | OFAC, UN, EU, and UK schema-specific normalization |
 | `sanctions_parser/models.py` | Stable relational data models |
 | `sanctions_parser/exporter.py` | CSV, Excel, and Parquet generation |
+| `sanctions_parser/delta.py` | Checkpoint snapshots, comparisons, and delta report exports |
+| `sanctions_parser/locking.py` | Per-source protection against overlapping runs |
 | `sanctions_parser/pipeline.py` | End-to-end source workflow and manifest management |
 | `sanctions_parser/interactive.py` | Rich terminal menus, summaries, and reports |
 | `sanctions_parser/health.py` | Uplink, freshness, raw-file, parser, and output checks |
