@@ -50,6 +50,13 @@ class DeltaOutcome:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class RawBaselineCandidate:
+    source: str
+    path: Path
+    archive_date: str
+
+
 def _cached_raw_path(project_root: Path, source_name: str) -> Path:
     state_path = project_root / ".state" / f"{source_name}.json"
     try:
@@ -238,6 +245,103 @@ def _find_raw_by_checksum(
     return None
 
 
+def _raw_archive_date(path: Path, source_root: Path) -> str:
+    try:
+        relative_parts = path.relative_to(source_root).parts[:-1]
+    except ValueError:
+        relative_parts = ()
+    for part in relative_parts:
+        try:
+            return datetime.strptime(part, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            continue
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC).date().isoformat()
+
+
+def find_existing_raw_baseline(
+    source: SourceConfig,
+    project_root: Path,
+) -> RawBaselineCandidate | None:
+    """Find the newest archived XML that can seed a missing delta checkpoint."""
+    if load_baseline_ref(project_root, source.name) is not None:
+        return None
+    source_root = project_root / "raw" / source.name
+    if not source_root.is_dir():
+        return None
+    candidates: list[tuple[tuple[str, int, str], RawBaselineCandidate]] = []
+    for path in source_root.rglob("*"):
+        if (
+            not path.is_file()
+            or path.suffix.casefold() != ".xml"
+            or any(part.startswith(".") for part in path.parts)
+        ):
+            continue
+        try:
+            archive_date = _raw_archive_date(path, source_root)
+            modified = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        candidate = RawBaselineCandidate(
+            source=source.name,
+            path=path,
+            archive_date=archive_date,
+        )
+        candidates.append(
+            (
+                (archive_date, modified, str(path)),
+                candidate,
+            )
+        )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _raw_baseline_created_at(candidate: RawBaselineCandidate) -> str:
+    try:
+        archive_day = datetime.strptime(candidate.archive_date, "%Y-%m-%d")
+        return archive_day.replace(tzinfo=UTC).isoformat()
+    except ValueError:
+        return datetime.fromtimestamp(candidate.path.stat().st_mtime, UTC).isoformat()
+
+
+def _import_initial_delta_baseline(
+    source: SourceConfig,
+    project_root: Path,
+    candidate: RawBaselineCandidate,
+) -> None:
+    if candidate.source != source.name:
+        raise ValueError(
+            f"Cannot use {candidate.source.upper()} raw XML as "
+            f"{source.name.upper()} baseline"
+        )
+    source_root = (project_root / "raw" / source.name).resolve()
+    raw_path = candidate.path.resolve()
+    try:
+        raw_path.relative_to(source_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"{source.name.upper()} baseline XML must be inside {source_root}"
+        ) from exc
+    if not raw_path.is_file() or raw_path.suffix.casefold() != ".xml":
+        raise ValueError(f"{source.name.upper()} baseline XML is missing: {raw_path}")
+    checksum = sha256_file(raw_path)
+    created_at = _raw_baseline_created_at(candidate)
+    snapshot = _snapshot_from_raw(
+        source,
+        raw_path,
+        checksum,
+        created_at=created_at,
+    )
+    save_baseline(project_root, snapshot, last_checked_at=created_at)
+    LOGGER.info(
+        "%s imported initial delta baseline from %s checksum=%s",
+        source.name,
+        raw_path,
+        checksum,
+    )
+
+
 def _snapshot_from_raw(
     source: SourceConfig,
     raw_path: Path,
@@ -319,9 +423,14 @@ def run_delta_source(
     project_root: Path,
     *,
     show_download_progress: bool = True,
+    initial_baseline: RawBaselineCandidate | None = None,
 ) -> DeltaOutcome:
     """Run a source comparison and advance its baseline only after export succeeds."""
     with source_lock(project_root / ".state", source.name):
+        if initial_baseline is not None and load_baseline_ref(
+            project_root, source.name
+        ) is None:
+            _import_initial_delta_baseline(source, project_root, initial_baseline)
         result = download_source(
             source,
             project_root / "raw",

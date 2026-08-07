@@ -17,7 +17,12 @@ from rich.text import Text
 from rich.tree import Tree
 
 from .config import SourceConfig
-from .delta import StoredDeltaReport, load_delta_preview, load_latest_delta_report
+from .delta import (
+    StoredDeltaReport,
+    load_baseline_ref,
+    load_delta_preview,
+    load_latest_delta_report,
+)
 from .health import (
     LocalHealth,
     ProviderHealth,
@@ -29,7 +34,9 @@ from .health import (
 from .pipeline import (
     PARSER_SCHEMA_VERSION,
     DeltaOutcome,
+    RawBaselineCandidate,
     SourceOutcome,
+    find_existing_raw_baseline,
     process_source,
     run_delta_source,
 )
@@ -166,25 +173,68 @@ class InteractiveCLI:
         selected = list(self.enabled) if action == "__all__" else self.choose_sources()
         if not selected:
             return False
+        initial_baselines: dict[str, RawBaselineCandidate] = {}
+        missing_raw: list[str] = []
+        for name in selected:
+            try:
+                if load_baseline_ref(self.project_root, name) is not None:
+                    continue
+                candidate = find_existing_raw_baseline(
+                    self.enabled[name],
+                    self.project_root,
+                )
+            except ValueError as exc:
+                self.console.print(f"[bold red]{exc}[/bold red]")
+                continue
+            if candidate is None:
+                missing_raw.append(name)
+            else:
+                initial_baselines[name] = candidate
         details = (
             "[bold]Mode:[/bold] compare latest lists with delta checkpoints\n"
             f"[bold]Sources:[/bold] "
             f"{', '.join(_label(name) for name in selected)}\n"
             "[dim]Reports: CSV, Excel and Parquet[/dim]"
         )
+        if initial_baselines:
+            baseline_lines = "\n".join(
+                f"  {_label(name)}: {candidate.archive_date} · "
+                f"{candidate.path.name}"
+                for name, candidate in initial_baselines.items()
+            )
+            details += (
+                "\n\n[bold cyan]Existing raw extracts will become the initial "
+                f"baseline:[/bold cyan]\n{baseline_lines}"
+            )
+        if missing_raw:
+            details += (
+                "\n\n[yellow]No previous raw extract found for: "
+                f"{', '.join(_label(name) for name in missing_raw)}. "
+                "The latest download will create the first baseline.[/yellow]"
+            )
         self.console.print(Panel(details, title="Delta run plan", border_style="blue"))
+        prompt = (
+            "Use the existing raw extracts as baseline and start delta check?"
+            if initial_baselines
+            else "Start delta check?"
+        )
         confirmed = questionary.confirm(
-            "Start delta check?", default=True, qmark="›"
+            prompt, default=True, qmark="›"
         ).ask()
         if not confirmed:
             self.console.print("[dim]Delta run cancelled.[/dim]\n")
             return False
-        self.process_delta(selected)
+        self.process_delta(selected, initial_baselines)
         return True
 
-    def process_delta(self, selected: list[str]) -> list[DeltaOutcome]:
+    def process_delta(
+        self,
+        selected: list[str],
+        initial_baselines: dict[str, RawBaselineCandidate] | None = None,
+    ) -> list[DeltaOutcome]:
         outcomes: list[DeltaOutcome] = []
         durations: dict[str, float] = {}
+        initial_baselines = initial_baselines or {}
         for name in selected:
             started = time.monotonic()
             with Progress(
@@ -200,6 +250,7 @@ class InteractiveCLI:
                         self.enabled[name],
                         self.project_root,
                         show_download_progress=False,
+                        initial_baseline=initial_baselines.get(name),
                     )
                 except Exception as exc:  # noqa: BLE001
                     outcome = DeltaOutcome(name, "failed", str(exc))

@@ -163,10 +163,14 @@ provider or all providers, including:
 ### Delta checks and name reports
 
 **Run delta check** compares the latest successfully parsed provider data with
-that provider's previous successful delta checkpoint. The first delta run
-creates a checkpoint and does not incorrectly label every existing record as
-new. Later runs classify stable provider IDs as `NEW`, `UPDATED`, `REMOVED`, or
-unchanged.
+that provider's previous successful delta checkpoint. When no checkpoint exists
+but an archived XML is already present under `raw/<source>/`, the interactive
+application offers to import the newest existing XML as the initial baseline
+before downloading. This supports moving previous extracts from an older build
+or another computer without copying machine-specific state files. If no archived
+XML exists, the latest download creates the first checkpoint and does not
+incorrectly label every existing record as new. Later runs classify stable
+provider IDs as `NEW`, `UPDATED`, `REMOVED`, or unchanged.
 
 The main report keeps one row per changed sanctions record and displays its
 primary name, ordered strong/weak/former aliases, alias count, previous primary

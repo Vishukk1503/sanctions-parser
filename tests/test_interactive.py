@@ -284,9 +284,15 @@ def test_delta_run_all_sources_processes_once_and_returns_to_menu(
         "sanctions_parser.interactive.questionary.select",
         lambda *args, **kwargs: SimpleNamespace(ask=lambda: "__all__"),
     )
+    confirm_prompts: list[str] = []
+
+    def fake_confirm(message, *args, **kwargs):
+        confirm_prompts.append(message)
+        return SimpleNamespace(ask=lambda: True)
+
     monkeypatch.setattr(
         "sanctions_parser.interactive.questionary.confirm",
-        lambda *args, **kwargs: SimpleNamespace(ask=lambda: True),
+        fake_confirm,
     )
     sources = {
         name: SourceConfig(name, f"https://example.test/{name}.xml", name)
@@ -297,15 +303,24 @@ def test_delta_run_all_sources_processes_once_and_returns_to_menu(
         sources,
         console=Console(file=StringIO(), force_terminal=False),
     )
-    selected: list[list[str]] = []
+    old_raw = tmp_path / "raw" / "ofac" / "2026-07-26" / "sdn.xml"
+    old_raw.parent.mkdir(parents=True)
+    old_raw.write_text("<sdnList/>", encoding="utf-8")
+    selected: list[tuple[list[str], dict]] = []
     monkeypatch.setattr(
         cli,
         "process_delta",
-        lambda names: selected.append(names) or [],
+        lambda names, baselines: selected.append((names, baselines)) or [],
     )
 
     assert cli.delta_run() is True
-    assert selected == [["ofac", "un"]]
+    assert selected[0][0] == ["ofac", "un"]
+    baselines = selected[0][1]
+    assert baselines["ofac"].path == old_raw
+    assert "un" not in baselines
+    assert confirm_prompts == [
+        "Use the existing raw extracts as baseline and start delta check?"
+    ]
 
 
 def test_delta_summary_and_source_preview_are_readable(tmp_path: Path) -> None:
