@@ -6,9 +6,10 @@ from types import SimpleNamespace
 from rich.console import Console
 
 from sanctions_parser.config import SourceConfig
+from sanctions_parser.delta import DeltaSummary, StoredDeltaReport
 from sanctions_parser.health import LocalHealth, ProviderHealth, UplinkHealth
 from sanctions_parser.interactive import InteractiveCLI
-from sanctions_parser.pipeline import SourceOutcome
+from sanctions_parser.pipeline import DeltaOutcome, SourceOutcome
 from sanctions_parser.reporting import ParsingStats
 
 
@@ -148,7 +149,8 @@ def test_main_menu_no_longer_contains_source_status(
     assert cli.run() == 0
     assert "View source status" not in captured_choices
     assert "Download and validate only" not in captured_choices
-    assert "View parsing reports" in captured_choices
+    assert "Run delta check" in captured_choices
+    assert "View reports" in captured_choices
 
 
 def test_parsing_report_renders_compact_statistics(tmp_path: Path) -> None:
@@ -273,3 +275,79 @@ def test_troubleshoot_health_choice_runs_dashboard(monkeypatch, tmp_path: Path) 
 
     assert cli.troubleshoot() is True
     assert called == [True]
+
+
+def test_delta_run_all_sources_processes_once_and_returns_to_menu(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "sanctions_parser.interactive.questionary.select",
+        lambda *args, **kwargs: SimpleNamespace(ask=lambda: "__all__"),
+    )
+    monkeypatch.setattr(
+        "sanctions_parser.interactive.questionary.confirm",
+        lambda *args, **kwargs: SimpleNamespace(ask=lambda: True),
+    )
+    sources = {
+        name: SourceConfig(name, f"https://example.test/{name}.xml", name)
+        for name in ("ofac", "un")
+    }
+    cli = InteractiveCLI(
+        tmp_path,
+        sources,
+        console=Console(file=StringIO(), force_terminal=False),
+    )
+    selected: list[list[str]] = []
+    monkeypatch.setattr(
+        cli,
+        "process_delta",
+        lambda names: selected.append(names) or [],
+    )
+
+    assert cli.delta_run() is True
+    assert selected == [["ofac", "un"]]
+
+
+def test_delta_summary_and_source_preview_are_readable(tmp_path: Path) -> None:
+    summary = DeltaSummary(
+        source="ofac",
+        result="changes",
+        previous_checkpoint="2026-08-01T00:00:00+00:00",
+        current_check="2026-08-08T00:00:00+00:00",
+        new=2,
+        updated=3,
+        removed=1,
+        unchanged=100,
+        current_records=105,
+        previous_checksum="old",
+        current_checksum="new",
+    )
+    report_dir = tmp_path / "output" / "delta" / "ofac" / "run"
+    csv_dir = report_dir / "csv"
+    csv_dir.mkdir(parents=True)
+    changes = csv_dir / "name_alias_changes.csv"
+    changes.write_text(
+        "status,entity_id,source,record_type,primary_name,aliases,alias_count,"
+        "what_changed,previous_primary_name,aliases_added,aliases_removed,"
+        "provider_date_updated\n"
+        "UPDATED,1,ofac,Entity,New Name,Alias [strong],1,Primary name changed,"
+        "Old Name,,,2026-08-08\n",
+        encoding="utf-8",
+    )
+    report = StoredDeltaReport("ofac", summary, report_dir, changes)
+    output = StringIO()
+    cli = InteractiveCLI(
+        tmp_path,
+        {"ofac": SourceConfig("ofac", "https://example.test/ofac.xml", "ofac")},
+        console=Console(file=output, force_terminal=False, width=160),
+    )
+
+    cli.show_delta_summary([DeltaOutcome("ofac", "changes", str(report_dir), summary)])
+    cli.show_source_delta_report(report)
+
+    rendered = output.getvalue()
+    assert "Name + alias delta check" in rendered
+    assert "2" in rendered and "3" in rendered
+    assert "Latest name + alias delta report" in rendered
+    assert "New Name" in rendered
+    assert "Primary name changed" in rendered

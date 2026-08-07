@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import re
-import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -30,20 +29,8 @@ ALIAS_TAG_PRIORITY = {
 }
 
 
-def _is_latin_name(value: str) -> bool:
-    """Return true when every letter in a name belongs to the Latin script."""
-    has_letter = False
-    for character in value:
-        if not character.isalpha():
-            continue
-        has_letter = True
-        if "LATIN" not in unicodedata.name(character, ""):
-            return False
-    return has_letter
-
-
 def _name_alias_frame(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Return one row per entity with tagged Latin aliases in display order."""
+    """Return one row per entity with all tagged aliases in display order."""
     entity_frame = frames["entity"][
         ["entity_id", "source", "record_type", "primary_name"]
     ].copy()
@@ -63,14 +50,11 @@ def _name_alias_frame(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
     for row in alias_frame.itertuples(index=False):
         entity_id = str(row.entity_id)
-        language = str(row.language or "").strip().casefold()
-        if language == "original script":
-            continue
         quality = str(row.quality or "")
         tag = alias_tag(quality)
         for raw_alias in re.split(r";\s+", str(row.alias or "")):
             alias = " ".join(raw_alias.split())
-            if not alias or not _is_latin_name(alias):
+            if not alias:
                 continue
             alias_key = alias.casefold()
             if alias_key == primary_names.get(entity_id, ""):

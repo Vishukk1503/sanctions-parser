@@ -78,10 +78,10 @@ def test_excel_combines_multiple_aliases_by_entity_id(tmp_path: Path) -> None:
                 "Individual",
                 "Primary Person",
                 (
-                    "Strong Alias [strong] | Regular Alias [strong] | "
+                    "Strong Alias [strong] | Regular Alias [strong] | اسم [strong] | "
                     "Weak Alias [weak] | Old Name [former]"
                 ),
-                4,
+                5,
             ),
             (
                 "2",

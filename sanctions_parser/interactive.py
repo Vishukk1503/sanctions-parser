@@ -17,6 +17,7 @@ from rich.text import Text
 from rich.tree import Tree
 
 from .config import SourceConfig
+from .delta import StoredDeltaReport, load_delta_preview, load_latest_delta_report
 from .health import (
     LocalHealth,
     ProviderHealth,
@@ -25,7 +26,13 @@ from .health import (
     compare_source_dates,
     read_source_date,
 )
-from .pipeline import PARSER_SCHEMA_VERSION, SourceOutcome, process_source
+from .pipeline import (
+    PARSER_SCHEMA_VERSION,
+    DeltaOutcome,
+    SourceOutcome,
+    process_source,
+    run_delta_source,
+)
 from .reporting import StoredParsingReport, load_latest_parsing_report
 
 SOURCE_LABELS = {
@@ -38,6 +45,12 @@ STATUS_STYLES = {
     "processed": "bold green",
     "downloaded": "bold cyan",
     "unchanged": "yellow",
+    "failed": "bold red",
+}
+DELTA_STATUS_STYLES = {
+    "baseline_created": "bold cyan",
+    "changes": "bold yellow",
+    "no_changes": "bold green",
     "failed": "bold red",
 }
 
@@ -71,7 +84,8 @@ class InteractiveCLI:
                 choices=[
                     Choice("Run all enabled sources", "run_all"),
                     Choice("Select sources to process", "select"),
-                    Choice("View parsing reports", "reports"),
+                    Choice("Run delta check", "delta"),
+                    Choice("View reports", "reports"),
                     Choice("Troubleshoot", "troubleshoot"),
                     Choice("Open output folder", "open_output"),
                     Choice("Exit", "exit"),
@@ -90,7 +104,13 @@ class InteractiveCLI:
                 else:
                     self._redraw()
             elif action == "reports":
-                if not self.parsing_reports():
+                self.reports()
+                self._redraw()
+            elif action == "delta":
+                if self.delta_run():
+                    self._redraw()
+                    returned_from_run = True
+                else:
                     self._redraw()
             elif action == "open_output":
                 self.open_output()
@@ -108,6 +128,143 @@ class InteractiveCLI:
                 if self.process(selected, formats):
                     self._redraw()
                     returned_from_run = True
+
+    def reports(self) -> bool:
+        action = questionary.select(
+            "View reports:",
+            choices=[
+                Choice("Parsing reports", "parsing"),
+                Choice("Weekly name + alias changes", "delta"),
+                Choice("← Back to main menu", "__back__"),
+            ],
+            default="parsing",
+            use_shortcuts=True,
+            qmark="›",
+        ).ask()
+        if action in (None, "__back__"):
+            return False
+        if action == "parsing":
+            self.parsing_reports()
+        else:
+            self.delta_reports()
+        return True
+
+    def delta_run(self) -> bool:
+        action = questionary.select(
+            "Run delta check:",
+            choices=[
+                Choice("All enabled sources", "__all__"),
+                Choice("Select sources", "__select__"),
+                Choice("← Back to main menu", "__back__"),
+            ],
+            default="__all__",
+            use_shortcuts=True,
+            qmark="›",
+        ).ask()
+        if action in (None, "__back__"):
+            return False
+        selected = list(self.enabled) if action == "__all__" else self.choose_sources()
+        if not selected:
+            return False
+        details = (
+            "[bold]Mode:[/bold] compare latest lists with delta checkpoints\n"
+            f"[bold]Sources:[/bold] "
+            f"{', '.join(_label(name) for name in selected)}\n"
+            "[dim]Reports: CSV, Excel and Parquet[/dim]"
+        )
+        self.console.print(Panel(details, title="Delta run plan", border_style="blue"))
+        confirmed = questionary.confirm(
+            "Start delta check?", default=True, qmark="›"
+        ).ask()
+        if not confirmed:
+            self.console.print("[dim]Delta run cancelled.[/dim]\n")
+            return False
+        self.process_delta(selected)
+        return True
+
+    def process_delta(self, selected: list[str]) -> list[DeltaOutcome]:
+        outcomes: list[DeltaOutcome] = []
+        durations: dict[str, float] = {}
+        for name in selected:
+            started = time.monotonic()
+            with Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("[progress.description]{task.description}"),
+                TimeElapsedColumn(),
+                console=self.console,
+                transient=True,
+            ) as progress:
+                progress.add_task(f"Checking {_label(name)} delta…", total=None)
+                try:
+                    outcome = run_delta_source(
+                        self.enabled[name],
+                        self.project_root,
+                        show_download_progress=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    outcome = DeltaOutcome(name, "failed", str(exc))
+            durations[name] = time.monotonic() - started
+            outcomes.append(outcome)
+            style = DELTA_STATUS_STYLES.get(outcome.status, "white")
+            label = outcome.status.replace("_", " ")
+            self.console.print(f"[{style}]● {name.upper()} {label}[/{style}]")
+        self.show_delta_summary(outcomes, durations)
+        return outcomes
+
+    def show_delta_summary(
+        self,
+        outcomes: list[DeltaOutcome],
+        durations: dict[str, float] | None = None,
+    ) -> None:
+        table = Table(
+            title="Name + alias delta check",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+        )
+        table.add_column("Source", no_wrap=True)
+        table.add_column("Result", no_wrap=True)
+        table.add_column("New", justify="right")
+        table.add_column("Updated", justify="right")
+        table.add_column("Removed", justify="right")
+        table.add_column("Unchanged", justify="right")
+        if durations is not None:
+            table.add_column("Duration", justify="right")
+        for outcome in outcomes:
+            summary = outcome.summary
+            result_label = outcome.status.replace("_", " ").title()
+            values = [
+                _label(outcome.source),
+                Text(
+                    result_label,
+                    style=DELTA_STATUS_STYLES.get(outcome.status, "white"),
+                ),
+                f"{summary.new:,}" if summary else "—",
+                f"{summary.updated:,}" if summary else "—",
+                f"{summary.removed:,}" if summary else "—",
+                f"{summary.unchanged:,}" if summary else "—",
+            ]
+            if durations is not None:
+                values.append(f"{durations.get(outcome.source, 0):.1f}s")
+            table.add_row(*values)
+        self.console.print()
+        self.console.print(table)
+        for outcome in outcomes:
+            for warning in outcome.warnings:
+                self.console.print(
+                    f"[bold yellow]Warning — {_label(outcome.source)}:[/bold yellow] "
+                    f"{warning}"
+                )
+        failures = sum(outcome.status == "failed" for outcome in outcomes)
+        if failures:
+            self.console.print(
+                f"[red]{failures} source(s) failed.[/red] "
+                "[dim]Their previous delta checkpoints were preserved.[/dim]\n"
+            )
+        else:
+            self.console.print(
+                "[green]Delta check complete.[/green] "
+                "[dim]Full reports are available under output/delta.[/dim]\n"
+            )
 
     def _header(self) -> None:
         title = Text("SANCTIONS DATA MANAGER", style="bold white")
@@ -501,6 +658,159 @@ class InteractiveCLI:
             f"{stats.sanctions:,}",
         )
         self.console.print(details)
+
+    def _load_delta_reports(self, source_names: list[str]) -> list[StoredDeltaReport]:
+        return [
+            report
+            for name in source_names
+            if (report := load_latest_delta_report(self.project_root, name)) is not None
+        ]
+
+    @staticmethod
+    def _delta_outcome(report: StoredDeltaReport) -> DeltaOutcome:
+        return DeltaOutcome(
+            report.source,
+            report.summary.result,
+            str(report.output_dir),
+            report.summary,
+        )
+
+    def delta_reports(self) -> bool:
+        action = questionary.select(
+            "Weekly name + alias changes:",
+            choices=[
+                Choice("Latest overview — all sources", "__all__"),
+                *[
+                    Choice(f"{_label(name)} — latest changes", name)
+                    for name in self.enabled
+                ],
+                Choice("← Back to main menu", "__back__"),
+            ],
+            default="__all__",
+            use_shortcuts=True,
+            qmark="›",
+        ).ask()
+        if action in (None, "__back__"):
+            return False
+        if action == "__all__":
+            reports = self._load_delta_reports(list(self.enabled))
+            if not reports:
+                self.console.print(
+                    Panel(
+                        "No delta reports are available.\n"
+                        "Run a delta check to create the initial checkpoints.",
+                        title="Weekly name + alias changes",
+                        border_style="yellow",
+                    )
+                )
+                return True
+            self.show_delta_summary([self._delta_outcome(report) for report in reports])
+            missing = [
+                _label(name)
+                for name in self.enabled
+                if name not in {report.source for report in reports}
+            ]
+            if missing:
+                self.console.print(
+                    f"[yellow]No delta report:[/yellow] {', '.join(missing)}\n"
+                )
+            return True
+
+        report = load_latest_delta_report(self.project_root, action)
+        if report is None:
+            self.console.print(
+                Panel(
+                    f"No {_label(action)} delta report is available.\n"
+                    "Run a delta check for this source first.",
+                    title="Weekly name + alias changes",
+                    border_style="yellow",
+                )
+            )
+            return True
+        self.show_source_delta_report(report)
+        return True
+
+    @staticmethod
+    def _short_checkpoint(value: str) -> str:
+        if not value:
+            return "First checkpoint"
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value
+
+    def show_source_delta_report(self, report: StoredDeltaReport) -> None:
+        summary = report.summary
+        status = Text(
+            summary.result.replace("_", " ").title(),
+            style=DELTA_STATUS_STYLES.get(summary.result, "white"),
+        )
+        details = Text.assemble(
+            ("Source: ", "bold"),
+            _label(report.source),
+            "\n",
+            ("Result: ", "bold"),
+            status,
+            "\n",
+            ("Previous checkpoint: ", "bold"),
+            self._short_checkpoint(summary.previous_checkpoint),
+            "\n",
+            ("Current check: ", "bold"),
+            self._short_checkpoint(summary.current_check),
+            "\n",
+            ("Changes: ", "bold"),
+            (
+                f"{summary.new:,} new • {summary.updated:,} updated • "
+                f"{summary.removed:,} removed"
+            ),
+            "\n",
+            ("Report: ", "bold"),
+            str(report.output_dir),
+        )
+        self.console.print(
+            Panel(
+                details,
+                title="Latest name + alias delta report",
+                border_style="bright_blue",
+            )
+        )
+        for warning in report.warnings:
+            self.console.print(f"[bold yellow]Warning:[/bold yellow] {warning}")
+
+        preview_rows = load_delta_preview(report, limit=10)
+        if not preview_rows:
+            self.console.print("[green]No changed records in this report.[/green]\n")
+            return
+        preview = Table(
+            title="Changed records preview",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+        )
+        preview.add_column("Status", no_wrap=True)
+        preview.add_column("Entity ID", no_wrap=True)
+        preview.add_column("Primary name", overflow="fold")
+        preview.add_column("Aliases", overflow="fold")
+        preview.add_column("What changed", overflow="fold")
+        for row in preview_rows:
+            status_value = row.get("status", "")
+            style = {
+                "NEW": "bold green",
+                "UPDATED": "bold yellow",
+                "REMOVED": "bold red",
+            }.get(status_value, "white")
+            preview.add_row(
+                Text(status_value, style=style),
+                row.get("entity_id", ""),
+                row.get("primary_name", ""),
+                row.get("aliases", ""),
+                row.get("what_changed", ""),
+            )
+        self.console.print(preview)
+        if summary.changed > len(preview_rows):
+            self.console.print(
+                f"[dim]Showing 10 of {summary.changed:,} changed records. "
+                "Open the Excel or CSV report for the complete list.[/dim]\n"
+            )
 
     def troubleshoot(self) -> bool:
         action = questionary.select(
