@@ -14,9 +14,13 @@ from sanctions_parser.delta import (
     load_snapshot,
     save_baseline,
 )
-from sanctions_parser.downloader import DownloadResult
+from sanctions_parser.downloader import DownloadResult, sha256_file
 from sanctions_parser.models import Address, Alias, Entity, NormalizedData
-from sanctions_parser.pipeline import PARSER_SCHEMA_VERSION, run_delta_source
+from sanctions_parser.pipeline import (
+    PARSER_SCHEMA_VERSION,
+    find_existing_raw_baseline,
+    run_delta_source,
+)
 
 
 def snapshot(
@@ -48,6 +52,103 @@ def test_first_comparison_creates_baseline_without_marking_records_new() -> None
     assert result.summary.new == 0
     assert result.summary.unchanged == 1
     assert result.changes == ()
+
+
+def test_existing_raw_baseline_chooses_latest_archived_xml(tmp_path: Path) -> None:
+    old_raw = tmp_path / "raw" / "ofac" / "2026-07-20" / "sdn.xml"
+    old_raw.parent.mkdir(parents=True)
+    old_raw.write_text("<old/>", encoding="utf-8")
+    latest_raw = tmp_path / "raw" / "ofac" / "2026-07-26" / "sdn.XML"
+    latest_raw.parent.mkdir(parents=True)
+    latest_raw.write_text("<latest/>", encoding="utf-8")
+    (latest_raw.parent / "notes.txt").write_text("ignore", encoding="utf-8")
+    source = SourceConfig("ofac", "https://example.test/ofac.xml", "ofac")
+
+    candidate = find_existing_raw_baseline(source, tmp_path)
+
+    assert candidate is not None
+    assert candidate.path == latest_raw
+    assert candidate.archive_date == "2026-07-26"
+
+
+def test_existing_raw_is_imported_before_latest_download_and_compared(
+    monkeypatch, tmp_path: Path
+) -> None:
+    old_raw = tmp_path / "raw" / "ofac" / "2026-07-26" / "sdn.xml"
+    old_raw.parent.mkdir(parents=True)
+    old_raw.write_text("<old/>", encoding="utf-8")
+    source = SourceConfig("ofac", "https://example.test/ofac.xml", "ofac")
+    candidate = find_existing_raw_baseline(source, tmp_path)
+    assert candidate is not None
+    current_raw = tmp_path / "raw" / "ofac" / "2026-08-07" / "sdn.xml"
+    current_raw.parent.mkdir(parents=True)
+    current_raw.write_text("<current/>", encoding="utf-8")
+    events: list[str] = []
+
+    def fake_parse(_name, path):
+        events.append(f"parse:{path.parent.name}")
+        primary_name = "Old Name" if path == old_raw else "Current Name"
+        return NormalizedData(
+            entities=[Entity("1", "ofac", "Entity", primary_name)]
+        )
+
+    def fake_download(*args, **kwargs):
+        events.append("download")
+        return DownloadResult("ofac", current_raw, "current-checksum", True, 10)
+
+    monkeypatch.setattr("sanctions_parser.pipeline.parse", fake_parse)
+    monkeypatch.setattr("sanctions_parser.pipeline.download_source", fake_download)
+
+    result = run_delta_source(
+        source,
+        tmp_path,
+        show_download_progress=False,
+        initial_baseline=candidate,
+    )
+    baseline = load_baseline_ref(tmp_path, "ofac")
+
+    assert events == ["parse:2026-07-26", "download", "parse:2026-08-07"]
+    assert result.status == "changes"
+    assert result.summary is not None
+    assert result.summary.updated == 1
+    assert result.summary.previous_checksum == sha256_file(old_raw)
+    assert result.summary.current_checksum == "current-checksum"
+    assert baseline is not None and baseline.checksum == "current-checksum"
+
+
+def test_failed_existing_raw_import_does_not_download_or_create_baseline(
+    monkeypatch, tmp_path: Path
+) -> None:
+    old_raw = tmp_path / "raw" / "ofac" / "2026-07-26" / "sdn.xml"
+    old_raw.parent.mkdir(parents=True)
+    old_raw.write_text("<broken/>", encoding="utf-8")
+    source = SourceConfig("ofac", "https://example.test/ofac.xml", "ofac")
+    candidate = find_existing_raw_baseline(source, tmp_path)
+    assert candidate is not None
+    download_called = False
+
+    monkeypatch.setattr(
+        "sanctions_parser.pipeline.parse",
+        lambda *args, **kwargs: NormalizedData(),
+    )
+
+    def fake_download(*args, **kwargs):
+        nonlocal download_called
+        download_called = True
+        raise AssertionError("download must not run after invalid baseline")
+
+    monkeypatch.setattr("sanctions_parser.pipeline.download_source", fake_download)
+
+    with pytest.raises(ValueError, match="produced zero entities"):
+        run_delta_source(
+            source,
+            tmp_path,
+            show_download_progress=False,
+            initial_baseline=candidate,
+        )
+
+    assert download_called is False
+    assert load_baseline_ref(tmp_path, "ofac") is None
 
 
 def test_entity_and_name_alias_changes_are_compared_by_stable_id() -> None:
