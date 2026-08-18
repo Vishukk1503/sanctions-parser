@@ -14,6 +14,9 @@ class Entity:
     comments: str = ""
     date_listed: str = ""
     date_updated: str = ""
+    primary_first_name: str = ""
+    primary_middle_name: str = ""
+    primary_last_name: str = ""
 
 
 @dataclass
@@ -40,6 +43,9 @@ class Alias:
     alias: str
     quality: str = ""
     language: str = ""
+    first_name: str = ""
+    middle_name: str = ""
+    last_name: str = ""
 
     @property
     def value(self) -> str:

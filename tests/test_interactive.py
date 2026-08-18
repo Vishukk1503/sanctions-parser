@@ -50,7 +50,7 @@ def test_all_source_and_format_choices(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert cli.choose_sources() == ["ofac", "un", "eu", "uk"]
-    assert cli.choose_formats() == {"csv", "excel", "parquet"}
+    assert cli.choose_formats() == {"csv", "excel", "parquet", "ssb"}
 
 
 def test_back_choices_return_to_main_menu(monkeypatch, tmp_path: Path) -> None:

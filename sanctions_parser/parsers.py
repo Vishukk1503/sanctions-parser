@@ -67,6 +67,14 @@ def _name(*parts: str) -> str:
     return " ".join(part.strip() for part in parts if part.strip())
 
 
+def _positional_name_parts(*parts: str) -> tuple[str, str, str]:
+    """Map ordered provider name slots without guessing from a full-name string."""
+    supplied = [part.strip() for part in parts if part.strip()]
+    if len(supplied) < 2:
+        return "", "", ""
+    return supplied[0], _name(*supplied[1:-1]), supplied[-1]
+
+
 def _join(*parts: str, separator: str = "; ") -> str:
     return separator.join(part.strip() for part in parts if part.strip())
 
@@ -136,7 +144,12 @@ def parse_ofac(path: Path) -> NormalizedData:
         if not _mandatory_id("ofac", entity_id, seen):
             _finish(element)
             continue
-        primary = _name(_text(element, "firstName"), _text(element, "lastName"))
+        first_name = _text(element, "firstName")
+        last_name = _text(element, "lastName")
+        primary = _name(first_name, last_name)
+        primary_parts = (
+            (first_name, "", last_name) if first_name and last_name else ("", "", "")
+        )
         data.entities.append(
             Entity(
                 entity_id=entity_id,
@@ -144,16 +157,29 @@ def parse_ofac(path: Path) -> NormalizedData:
                 record_type=_text(element, "sdnType") or "entity",
                 primary_name=primary,
                 comments=_text(element, "remarks"),
+                primary_first_name=primary_parts[0],
+                primary_middle_name=primary_parts[1],
+                primary_last_name=primary_parts[2],
             )
         )
         for alias in _descendants(element, "aka"):
-            value = _name(_text(alias, "firstName"), _text(alias, "lastName"))
+            alias_first = _text(alias, "firstName")
+            alias_last = _text(alias, "lastName")
+            value = _name(alias_first, alias_last)
+            alias_parts = (
+                (alias_first, "", alias_last)
+                if alias_first and alias_last
+                else ("", "", "")
+            )
             if value and value != primary:
                 data.aliases.append(
                     Alias(
                         entity_id,
                         value,
                         quality=_text(alias, "category") or _text(alias, "type"),
+                        first_name=alias_parts[0],
+                        middle_name=alias_parts[1],
+                        last_name=alias_parts[2],
                     )
                 )
         for address in _descendants(element, "address"):
@@ -224,12 +250,14 @@ def parse_un(path: Path) -> NormalizedData:
         if not _mandatory_id("un", entity_id, seen):
             _finish(element)
             continue
-        primary = _name(
+        primary_slots = (
             _text(element, "FIRST_NAME"),
             _text(element, "SECOND_NAME"),
             _text(element, "THIRD_NAME"),
             _text(element, "FOURTH_NAME"),
         )
+        primary = _name(*primary_slots)
+        primary_parts = _positional_name_parts(*primary_slots)
         original_name = _text(element, "NAME_ORIGINAL_SCRIPT")
         if not primary:
             primary = original_name
@@ -245,6 +273,9 @@ def parse_un(path: Path) -> NormalizedData:
                 comments=_text(element, "COMMENTS1"),
                 date_listed=_text(element, "LISTED_ON"),
                 date_updated=updated,
+                primary_first_name=primary_parts[0],
+                primary_middle_name=primary_parts[1],
+                primary_last_name=primary_parts[2],
             )
         )
         if original_name and original_name != primary:
@@ -416,6 +447,22 @@ def parse_eu(path: Path) -> NormalizedData:
         name_nodes = list(_direct(element, "nameAlias"))
         primary_node = _eu_primary_name_node(name_nodes)
         primary = _attr(primary_node, "wholeName") if primary_node is not None else ""
+        if primary_node is not None:
+            primary_parts = (
+                _attr(primary_node, "firstName"),
+                _attr(primary_node, "middleName"),
+                _attr(primary_node, "lastName"),
+            )
+            if not primary:
+                primary = _name(*primary_parts)
+            if (
+                not primary_parts[0]
+                or not primary_parts[2]
+                or _name(*primary_parts).casefold() != primary.casefold()
+            ):
+                primary_parts = ("", "", "")
+        else:
+            primary_parts = ("", "", "")
         subject = next(iter(_direct(element, "subjectType")), None)
         regulations = list(_direct(element, "regulation"))
         publication_dates = sorted(
@@ -433,14 +480,24 @@ def parse_eu(path: Path) -> NormalizedData:
                 comments=comments,
                 date_listed=publication_dates[0] if publication_dates else "",
                 date_updated=publication_dates[-1] if publication_dates else "",
+                primary_first_name=primary_parts[0],
+                primary_middle_name=primary_parts[1],
+                primary_last_name=primary_parts[2],
             )
         )
         for alias in name_nodes:
-            value = _attr(alias, "wholeName") or _name(
+            alias_parts = (
                 _attr(alias, "firstName"),
                 _attr(alias, "middleName"),
                 _attr(alias, "lastName"),
             )
+            value = _attr(alias, "wholeName") or _name(*alias_parts)
+            if (
+                not alias_parts[0]
+                or not alias_parts[2]
+                or _name(*alias_parts).casefold() != value.casefold()
+            ):
+                alias_parts = ("", "", "")
             if value and alias is not primary_node:
                 data.aliases.append(
                     Alias(
@@ -449,6 +506,9 @@ def parse_eu(path: Path) -> NormalizedData:
                         quality=_eu_alias_quality(alias),
                         language=_attr(alias, "nameLanguage")
                         or _attr(alias, "regulationLanguage"),
+                        first_name=alias_parts[0],
+                        middle_name=alias_parts[1],
+                        last_name=alias_parts[2],
                     )
                 )
         for address in _direct(element, "address"):
@@ -562,6 +622,15 @@ def _uk_name(element: Element) -> str:
     return last_or_full
 
 
+def _uk_name_parts(element: Element) -> tuple[str, str, str]:
+    first = _text(element, "Name1")
+    middle = _name(*[_text(element, f"Name{index}") for index in range(2, 6)])
+    last = _text(element, "Name6")
+    if first and last:
+        return first, middle, last
+    return "", "", ""
+
+
 def _uk_alias_quality(element: Element) -> str:
     strength = " ".join(_text(element, "AliasStrength").casefold().split())
     if strength == "low quality a.k.a":
@@ -591,6 +660,9 @@ def parse_uk(path: Path) -> NormalizedData:
             next((item for item in name_nodes if _uk_name(item)), None),
         )
         primary = _uk_name(primary_node) if primary_node is not None else ""
+        primary_parts = (
+            _uk_name_parts(primary_node) if primary_node is not None else ("", "", "")
+        )
         comments = _join(
             _text(element, "OtherInformation"),
             _text(element, "UKStatementofReasons"),
@@ -604,13 +676,24 @@ def parse_uk(path: Path) -> NormalizedData:
                 comments=comments,
                 date_listed=_text(element, "DateDesignated"),
                 date_updated=_text(element, "LastUpdated"),
+                primary_first_name=primary_parts[0],
+                primary_middle_name=primary_parts[1],
+                primary_last_name=primary_parts[2],
             )
         )
         for alias in name_nodes:
             value = _uk_name(alias)
+            alias_parts = _uk_name_parts(alias)
             if value and alias is not primary_node:
                 data.aliases.append(
-                    Alias(entity_id, value, quality=_uk_alias_quality(alias))
+                    Alias(
+                        entity_id,
+                        value,
+                        quality=_uk_alias_quality(alias),
+                        first_name=alias_parts[0],
+                        middle_name=alias_parts[1],
+                        last_name=alias_parts[2],
+                    )
                 )
         for alias in _descendants(element, "NonLatinName"):
             value = _text(alias, "NameNonLatinScript")

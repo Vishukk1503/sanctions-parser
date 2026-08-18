@@ -8,7 +8,7 @@
   <img alt="Python 3.11–3.14" src="https://img.shields.io/badge/Python-3.11–3.14-3776AB?logo=python&logoColor=white">
   <img alt="Sources: OFAC, UN, EU, UK" src="https://img.shields.io/badge/Sources-OFAC%20%7C%20UN%20%7C%20EU%20%7C%20UK-00A67E">
   <img alt="Interface: Rich CLI" src="https://img.shields.io/badge/Interface-Rich%20CLI-7B2CBF">
-  <img alt="Exports: CSV, Excel, Parquet" src="https://img.shields.io/badge/Exports-CSV%20%7C%20Excel%20%7C%20Parquet-217346">
+  <img alt="Exports: CSV, Excel, Parquet, SSB" src="https://img.shields.io/badge/Exports-CSV%20%7C%20Excel%20%7C%20Parquet%20%7C%20SSB-217346">
 </p>
 
 ---
@@ -50,7 +50,7 @@ flowchart LR
     E -- No --> F["Keep current output"]
     E -- Yes --> G["Parse provider schema"]
     G --> H["Normalize relational tables"]
-    H --> I["Export CSV, Excel<br/>and/or Parquet"]
+    H --> I["Export CSV, Excel,<br/>Parquet and/or SSB"]
     I --> J["Save manifest and<br/>parsing statistics"]
 ```
 
@@ -213,6 +213,9 @@ sanctions-parser/
 │           │   ├── entity.parquet
 │           │   ├── alias.parquet
 │           │   └── ...
+│           ├── ssb/
+│           │   ├── <source>-individuals.csv
+│           │   └── <source>-organizations.csv
 │           └── manifest.json
 └── logs/
     └── run.log
@@ -223,8 +226,10 @@ Previous raw XML versions remain archived instead of being overwritten.
 
 Delta reports are stored under `output/delta/<source>/<run timestamp>/`. Every
 delta report contains `change_summary` and `name_alias_changes` in CSV, Excel,
-and Parquet formats. Internal compressed checkpoints live under
-`.state/delta/`; they are operational state rather than user-facing exports.
+and Parquet formats. It also contains `ssb/<source>-individuals.csv` and
+`ssb/<source>-organizations.csv` with only the changed records. Internal
+compressed checkpoints live under `.state/delta/`; they are operational state
+rather than user-facing exports.
 
 ### Normalized tables
 
@@ -254,7 +259,10 @@ schema.
 
 Each Excel workbook also contains a convenience sheet named **`name+alias`**.
 It keeps one row per entity and places the primary name and that entity's
-Latin and non-Latin aliases together.
+Latin and non-Latin aliases together. It also shows the same primary and first
+three alias component fields used by the SSB export: first, middle, last, full
+name, and `IsBrokenName`. The original combined `primary_name` remains in the
+sheet for convenient review.
 
 Aliases are ordered by quality:
 
@@ -265,7 +273,48 @@ Aliases are ordered by quality:
 The sheet includes a distinct alias count. Multiple aliases are kept in one
 readable `aliases` cell, separated with `|` and tagged as `[strong]`, `[weak]`,
 or `[former]`. The normalized `alias` sheet remains the authoritative
-one-alias-per-row representation for database loading and analysis.
+one-alias-per-row representation for database loading and analysis. The three
+split alias slots are a convenience view; aliases beyond the third remain in
+the complete tagged `aliases` cell and are included in `alias_count`.
+
+### SSB name and alias files
+
+Selecting **SSB name + alias files** creates exactly two UTF-8 files for each
+provider under the run's `ssb` directory:
+
+- `<source>-individuals.csv`;
+- `<source>-organizations.csv`.
+
+They use the fixed 83-column SSB header and a pipe (`|`) delimiter despite the
+`.csv` extension. Every physical row has exactly 83 fields and 82 pipes, with
+no trailing delimiter and no quoted values. Missing values remain blank. Pipes,
+line breaks, carriage returns, and tabs inside source values are replaced with
+spaces so they cannot damage the file structure.
+
+Only individual and organization records are included. Vessels, ships,
+aircraft, and unknown party types are excluded. Each provider entity ID is
+retained as text in `PartyId1Value`; `PartyKey` qualifies it with the provider,
+for example `UK_AFG0001`, so IDs from different lists cannot collide.
+
+Name mapping is deliberately limited to the agreed name-and-alias scope:
+
+| Party | Primary name | Up to three ordered aliases |
+| --- | --- | --- |
+| Organization | `PrimaryFullName` | `Alias1FullName` through `Alias3FullName` |
+| Individual with reliable source components | First, middle, and last columns; `IsBrokenName=true` | Matching alias component columns; `IsBrokenName=true` |
+| Individual with only a complete name | Entire name in `PrimaryLastName` | Entire alias in the corresponding `AliasNLastName` |
+
+Aliases are de-duplicated and ordered strong, then weak, then former. Only the
+first three fit the SSB schema; the normalized alias table remains the complete
+source when an entity has more than three. Address, birth, nationality, and
+other non-name SSB fields are intentionally blank rather than inferred.
+
+Delta runs use the same SSB layout, but include only current `NEW` and `UPDATED`
+records. Removed records are deliberately excluded and no change status is
+written into the SSB fields. `NEW`, `UPDATED`, and `REMOVED` remain available in
+the standard delta CSV, Excel, and Parquet reports. A first-time baseline or a
+run with no changes still creates both SSB files with the required header and
+no data rows.
 
 ### `manifest.json`
 
@@ -394,7 +443,8 @@ python -m pip check
 | `sanctions_parser/downloader.py` | Streaming HTTP download, retries, XML validation, and checksums |
 | `sanctions_parser/parsers.py` | OFAC, UN, EU, and UK schema-specific normalization |
 | `sanctions_parser/models.py` | Stable relational data models |
-| `sanctions_parser/exporter.py` | CSV, Excel, and Parquet generation |
+| `sanctions_parser/exporter.py` | Relational CSV, Excel, and Parquet generation |
+| `sanctions_parser/ssb.py` | Strict 83-column SSB name-and-alias generation |
 | `sanctions_parser/delta.py` | Checkpoint snapshots, comparisons, and delta report exports |
 | `sanctions_parser/locking.py` | Per-source protection against overlapping runs |
 | `sanctions_parser/pipeline.py` | End-to-end source workflow and manifest management |

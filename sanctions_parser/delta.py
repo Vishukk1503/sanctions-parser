@@ -6,7 +6,7 @@ import json
 import re
 import unicodedata
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,10 +16,11 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .models import NormalizedData
+from .models import Alias, Entity, NormalizedData
 from .reporting import alias_tag
+from .ssb import SsbExportResult, export_ssb
 
-DELTA_SCHEMA_VERSION = 1
+DELTA_SCHEMA_VERSION = 2
 CHANGE_COLUMNS = [
     "status",
     "entity_id",
@@ -131,6 +132,8 @@ class DeltaSummary:
 class DeltaComparison:
     summary: DeltaSummary
     changes: tuple[dict[str, Any], ...]
+    previous: DeltaSnapshot | None = None
+    current: DeltaSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -456,7 +459,7 @@ def compare_snapshots(
 
     if previous is None:
         return DeltaComparison(
-            DeltaSummary(
+            summary=DeltaSummary(
                 current.source,
                 "baseline_created",
                 "",
@@ -469,7 +472,9 @@ def compare_snapshots(
                 "",
                 current.checksum,
             ),
-            (),
+            changes=(),
+            previous=previous,
+            current=current,
         )
 
     if previous.source != current.source:
@@ -569,7 +574,7 @@ def compare_snapshots(
     unchanged = len(common_ids) - updated
     changed_count = len(added_ids) + updated + len(removed_ids)
     return DeltaComparison(
-        DeltaSummary(
+        summary=DeltaSummary(
             current.source,
             "changes" if changed_count else "no_changes",
             previous.created_at,
@@ -582,7 +587,9 @@ def compare_snapshots(
             previous.checksum,
             current.checksum,
         ),
-        tuple(rows),
+        changes=tuple(rows),
+        previous=previous,
+        current=current,
     )
 
 
@@ -612,8 +619,51 @@ def _format_sheet(sheet: Worksheet, widths: dict[str, int], table_name: str) -> 
         sheet.add_table(table)
 
 
-def export_delta_report(comparison: DeltaComparison, output_dir: Path) -> None:
-    """Write the compact delta report in CSV, Excel and Parquet formats."""
+def _stored_text(value: object) -> str:
+    return "" if value is None else str(value)
+
+
+def _delta_ssb_data(comparison: DeltaComparison) -> NormalizedData:
+    """Restore current NEW and UPDATED names for the SSB delta files."""
+    if comparison.current is None:
+        raise ValueError("Delta SSB export requires the current parsed snapshot")
+
+    current_entities = _entity_rows(comparison.current)
+    current_aliases = _rows_by_entity(comparison.current, "alias")
+    data = NormalizedData()
+    entity_fields = tuple(item.name for item in fields(Entity))
+    alias_fields = tuple(item.name for item in fields(Alias))
+
+    for change in comparison.changes:
+        entity_id = _text(change.get("entity_id"))
+        status = _text(change.get("status")).upper()
+        if status == "REMOVED":
+            continue
+        row = current_entities.get(entity_id)
+        if row is None:
+            raise ValueError(f"Delta SSB record is missing entity ID {entity_id}")
+        entity_values = {
+            name: _stored_text(row.get(name, "")) for name in entity_fields
+        }
+        entity_values["source"] = entity_values["source"] or comparison.summary.source
+        data.entities.append(Entity(**entity_values))
+        for alias_row in current_aliases.get(entity_id, []):
+            data.aliases.append(
+                Alias(
+                    **{
+                        name: _stored_text(alias_row.get(name, ""))
+                        for name in alias_fields
+                    }
+                )
+            )
+    return data
+
+
+def export_delta_report(
+    comparison: DeltaComparison,
+    output_dir: Path,
+) -> SsbExportResult:
+    """Write the standard delta reports and strict SSB change files."""
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_dir = output_dir / "csv"
     excel_dir = output_dir / "excel"
@@ -691,6 +741,13 @@ def export_delta_report(comparison: DeltaComparison, output_dir: Path) -> None:
             if fill:
                 for cell in row:
                     cell.fill = fill
+
+    ssb_data = _delta_ssb_data(comparison)
+    return export_ssb(
+        ssb_data,
+        output_dir / "ssb",
+        source=comparison.summary.source,
+    )
 
 
 def load_latest_delta_report(

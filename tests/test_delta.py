@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from sanctions_parser.pipeline import (
     find_existing_raw_baseline,
     run_delta_source,
 )
+from sanctions_parser.ssb import SSB_COLUMNS
 
 
 def snapshot(
@@ -309,6 +311,25 @@ def test_delta_report_exports_csv_excel_and_parquet(tmp_path: Path) -> None:
         ).metadata.num_rows
         == 1
     )
+    individual_lines = (tmp_path / "ssb" / "ofac-individuals.csv").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    organization_lines = (tmp_path / "ssb" / "ofac-organizations.csv").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(individual_lines) == 1
+    assert len(organization_lines) == 2
+    organization = dict(
+        zip(SSB_COLUMNS, organization_lines[1].split("|"), strict=True)
+    )
+    assert organization["PartyKey"] == "OFAC_1"
+    assert organization["PrimaryFullName"] == "New"
+    assert organization["CustomField1- EntityStatus"] == ""
+    assert organization_lines[1].count("|") == 82
+    with (tmp_path / "csv" / "name_alias_changes.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        assert next(csv.DictReader(handle))["status"] == "UPDATED"
     workbook = load_workbook(
         tmp_path / "excel" / "delta-report.xlsx",
         read_only=False,
@@ -322,6 +343,80 @@ def test_delta_report_exports_csv_excel_and_parquet(tmp_path: Path) -> None:
         assert sheet.freeze_panes == "A2"
     finally:
         workbook.close()
+
+
+def test_initial_delta_baseline_exports_empty_ssb_files(tmp_path: Path) -> None:
+    current = snapshot(
+        NormalizedData(entities=[Entity("1", "ofac", "Individual", "Example")]),
+        "current",
+        "2026-08-08T00:00:00+00:00",
+    )
+    comparison = compare_snapshots(None, current)
+
+    export_delta_report(comparison, tmp_path)
+
+    for party_type in ("individuals", "organizations"):
+        lines = (tmp_path / "ssb" / f"ofac-{party_type}.csv").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        assert lines == ["|".join(SSB_COLUMNS)]
+
+
+def test_delta_ssb_excludes_removed_records_but_csv_retains_them(
+    tmp_path: Path,
+) -> None:
+    previous = snapshot(
+        NormalizedData(
+            entities=[
+                Entity(
+                    "001",
+                    "ofac",
+                    "Individual",
+                    "Ada Lovelace",
+                    primary_first_name="Ada",
+                    primary_last_name="Lovelace",
+                )
+            ],
+            aliases=[
+                Alias(
+                    "001",
+                    "A. Lovelace",
+                    "strong",
+                    first_name="A.",
+                    last_name="Lovelace",
+                )
+            ],
+        ),
+        "old",
+        "2026-08-01T00:00:00+00:00",
+    )
+    current = snapshot(
+        NormalizedData(entities=[Entity("002", "ofac", "Entity", "New Company")]),
+        "new",
+        "2026-08-08T00:00:00+00:00",
+    )
+
+    export_delta_report(compare_snapshots(previous, current), tmp_path)
+
+    individual_lines = (tmp_path / "ssb" / "ofac-individuals.csv").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert individual_lines == ["|".join(SSB_COLUMNS)]
+    organization_lines = (tmp_path / "ssb" / "ofac-organizations.csv").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    current_row = dict(
+        zip(SSB_COLUMNS, organization_lines[1].split("|"), strict=True)
+    )
+    assert current_row["PartyKey"] == "OFAC_002"
+    assert current_row["CustomField1- EntityStatus"] == ""
+    with (tmp_path / "csv" / "name_alias_changes.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        assert {row["status"] for row in csv.DictReader(handle)} == {
+            "NEW",
+            "REMOVED",
+        }
 
 
 def test_successful_delta_advances_baseline_only_after_report(
