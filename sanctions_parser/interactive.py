@@ -365,6 +365,7 @@ class InteractiveCLI:
                 Choice("CSV", "csv"),
                 Choice("Excel workbook", "excel"),
                 Choice("Parquet", "parquet"),
+                Choice("SSB name + alias files", "ssb"),
             ],
             validate=lambda answer: bool(answer) or "Select at least one export format",
             instruction="(Arrow keys move, Space selects, Enter confirms)",
@@ -375,7 +376,7 @@ class InteractiveCLI:
         if "__back__" in selected:
             return None
         if "__all__" in selected:
-            return {"csv", "excel", "parquet"}
+            return {"csv", "excel", "parquet", "ssb"}
         return set(selected)
 
     def process(self, selected: list[str], formats: set[str]) -> bool:

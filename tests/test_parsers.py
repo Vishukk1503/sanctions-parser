@@ -23,6 +23,15 @@ def test_ofac_parser_normalizes_relations(tmp_path: Path) -> None:
     data = parse_ofac(xml)
     assert data.entities[0].entity_id == "42"
     assert data.entities[0].primary_name == "Ada Lovelace"
+    assert (
+        data.entities[0].primary_first_name,
+        data.entities[0].primary_middle_name,
+        data.entities[0].primary_last_name,
+    ) == ("Ada", "", "Lovelace")
+    assert (data.aliases[0].first_name, data.aliases[0].last_name) == (
+        "A.",
+        "Lovelace",
+    )
     assert data.programs[0].value == "TEST"
     assert data.addresses[0].city == "London"
     assert data.documents[0].number == "P42"
@@ -60,6 +69,11 @@ def test_un_parser_maps_source_specific_relations(tmp_path: Path) -> None:
     data = parse_un(xml)
 
     assert data.entities[0].primary_name == "Ada Lovelace"
+    assert (
+        data.entities[0].primary_first_name,
+        data.entities[0].primary_middle_name,
+        data.entities[0].primary_last_name,
+    ) == ("Ada", "", "Lovelace")
     assert data.entities[0].date_updated == "2024-02-03"
     assert data.aliases[0].alias == "A. Lovelace"
     assert data.aliases[1].alias == "Ada L."
@@ -80,8 +94,10 @@ def test_eu_parser_reads_attribute_based_fields(tmp_path: Path) -> None:
         publicationDate="2024-01-01" entryIntoForceDate="2024-01-02"
         regulationType="regulation"><publicationUrl>https://example.test/r</publicationUrl>
         </regulation><subjectType code="person"/>
-        <nameAlias wholeName="Ada Lovelace" strong="true" nameLanguage="EN"/>
-        <nameAlias wholeName="A. Lovelace" strong="false" nameLanguage="EN"/>
+        <nameAlias wholeName="Ada Lovelace" firstName="Ada" lastName="Lovelace"
+        strong="true" nameLanguage="EN"/>
+        <nameAlias wholeName="A. Lovelace" firstName="A." lastName="Lovelace"
+        strong="false" nameLanguage="EN"/>
         <address street="1 Main St" city="London" zipCode="N1"
         countryDescription="UNITED KINGDOM"/>
         <citizenship countryDescription="UNITED KINGDOM"/>
@@ -98,7 +114,16 @@ def test_eu_parser_reads_attribute_based_fields(tmp_path: Path) -> None:
 
     assert data.entities[0].primary_name == "Ada Lovelace"
     assert data.entities[0].record_type == "person"
+    assert (
+        data.entities[0].primary_first_name,
+        data.entities[0].primary_middle_name,
+        data.entities[0].primary_last_name,
+    ) == ("Ada", "", "Lovelace")
     assert data.aliases[0].alias == "A. Lovelace"
+    assert (data.aliases[0].first_name, data.aliases[0].last_name) == (
+        "A.",
+        "Lovelace",
+    )
     assert data.addresses[0].address == "1 Main St"
     assert data.addresses[0].country == "UNITED KINGDOM"
     assert data.documents[0].number == "P1"
@@ -189,6 +214,15 @@ def test_uk_parser_maps_names_identifiers_and_sanctions(tmp_path: Path) -> None:
     data = parse_uk(xml)
 
     assert data.entities[0].primary_name == "Ada Lovelace"
+    assert (
+        data.entities[0].primary_first_name,
+        data.entities[0].primary_middle_name,
+        data.entities[0].primary_last_name,
+    ) == ("Ada", "", "Lovelace")
+    assert (data.aliases[0].first_name, data.aliases[0].last_name) == (
+        "A.",
+        "Lovelace",
+    )
     assert len(data.aliases) == 2
     assert data.addresses[0].country == "United Kingdom"
     assert {item.number for item in data.documents} == {"N1", "P1"}

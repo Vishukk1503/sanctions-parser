@@ -296,6 +296,13 @@ def _missing_export_files(output_dir: Path, manifest: dict[str, object]) -> list
             for table in tables
             if not (output_dir / "parquet" / f"{table}.parquet").is_file()
         )
+    if "ssb" in formats:
+        source = str(manifest.get("source", "")).casefold()
+        missing.extend(
+            f"ssb/{source}-{party_type}.csv"
+            for party_type in ("individuals", "organizations")
+            if not (output_dir / "ssb" / f"{source}-{party_type}.csv").is_file()
+        )
     return sorted(missing)
 
 
@@ -437,6 +444,7 @@ def check_local_health(source: SourceConfig, project_root: Path) -> LocalHealth:
                 ("csv", "CSV"),
                 ("excel", "XLSX"),
                 ("parquet", "PQ"),
+                ("ssb", "SSB"),
             )
             if key in formats
         ]

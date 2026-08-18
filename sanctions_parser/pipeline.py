@@ -29,7 +29,7 @@ from .parsers import parse
 from .reporting import ParsingStats, build_parsing_stats
 
 LOGGER = logging.getLogger("sanctions_parser.pipeline")
-PARSER_SCHEMA_VERSION = 7
+PARSER_SCHEMA_VERSION = 10
 
 
 @dataclass
@@ -73,11 +73,21 @@ def _cached_raw_path(project_root: Path, source_name: str) -> Path:
     return raw_path
 
 
-def _required_exports(output_dir: Path, formats: set[str], tables: set[str]) -> bool:
+def _required_exports(
+    output_dir: Path,
+    formats: set[str],
+    tables: set[str],
+    source_name: str,
+) -> bool:
     if "excel" in formats and not (output_dir / "excel" / "sanctions.xlsx").is_file():
         return False
     if "csv" in formats and any(
         not (output_dir / "csv" / f"{table}.csv").is_file() for table in tables
+    ):
+        return False
+    if "ssb" in formats and any(
+        not (output_dir / "ssb" / f"{source_name}-{party_type}.csv").is_file()
+        for party_type in ("individuals", "organizations")
     ):
         return False
     return not (
@@ -116,7 +126,10 @@ def _reusable_output(
             continue
         tables = set(manifest.get("tables", {}))
         report = ParsingStats.from_dict(manifest.get("parsing_summary"))
-        if _required_exports(output_dir, formats, tables) and report is not None:
+        if (
+            _required_exports(output_dir, formats, tables, source_name)
+            and report is not None
+        ):
             return (
                 output_dir,
                 int(manifest.get("tables", {}).get("entity", 0)),
@@ -138,7 +151,7 @@ def _process_source_unlocked(
         project_root / ".state",
         show_progress=show_download_progress,
     )
-    formats = export_formats or {"csv", "excel", "parquet"}
+    formats = export_formats or {"csv", "excel", "parquet", "ssb"}
     if not result.changed:
         reusable = _reusable_output(project_root, source.name, result.checksum, formats)
         if reusable is not None:
@@ -175,6 +188,7 @@ def _process_source_unlocked(
         export_csv="csv" in formats,
         excel="excel" in formats,
         parquet="parquet" in formats,
+        ssb="ssb" in formats,
     )
     table_counts = {name: len(rows) for name, rows in data.tables().items()}
     (target / "manifest.json").write_text(
@@ -352,7 +366,8 @@ def _snapshot_from_raw(
     data = parse(source.parser, raw_path)
     if not data.entities:
         raise ValueError(
-            f"{source.name} parser produced zero entities; delta baseline was not changed"
+            f"{source.name} parser produced zero entities; "
+            "delta baseline was not changed"
         )
     return build_snapshot(
         data,
@@ -483,13 +498,20 @@ def run_delta_source(
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.parent / f".{target.name}-{uuid4().hex}.part"
         try:
-            export_delta_report(comparison, temporary)
+            ssb_result = export_delta_report(comparison, temporary)
             manifest = {
                 "delta_schema_version": DELTA_SCHEMA_VERSION,
                 "parser_schema_version": PARSER_SCHEMA_VERSION,
                 "source": source.name,
                 "raw_path": str(raw_path),
                 "summary": comparison.summary.to_dict(),
+                "formats": ["csv", "excel", "parquet", "ssb"],
+                "ssb_summary": {
+                    "individuals": ssb_result.individuals,
+                    "organizations": ssb_result.organizations,
+                    "excluded": ssb_result.excluded,
+                    "aliases_omitted_after_three": ssb_result.aliases_omitted,
+                },
                 "warnings": warnings,
             }
             (temporary / "manifest.json").write_text(
